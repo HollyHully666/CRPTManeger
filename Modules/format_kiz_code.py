@@ -1,153 +1,85 @@
-from pathlib import Path
-import logging
-import re
+from pathlib import Path  # Импортируем модуль Path для работы с файловыми путями
+import re  # Импортируем модуль re для работы с регулярными выражениями
 
-if not logging.getLogger().hasHandlers():
-    logging.basicConfig(
-        level=logging.INFO,
-        format='%(asctime)s - %(levelname)s - %(message)s'
-    )
+def sanitize_filename(filename: str) -> str:  # Определяем функцию sanitize_filename, принимающую строку и возвращающую очищенную строку
+    return re.sub(r'[^\w\-]', '_', filename)  # Заменяем все символы, кроме букв, цифр и дефисов, на подчеркивание и возвращаем результат
 
-def sanitize_filename(filename: str) -> str:
-    """
-    Очищает имя файла от недопустимых символов.
-    Args:
-        filename (str): Исходное имя файла.
-    Returns:
-        str: Очищенное имя файла.
-    """
-    return re.sub(r'[^\w\-]', '_', filename)
+def apply_format(code: str) -> str:  # Определяем функцию apply_format, принимающую строку и возвращающую отформатированную строку
+    if ',' in code:  # Проверяем, есть ли в строке запятая
+        return f'"{code.replace('"', '""')}"'  # Если есть запятая, оборачиваем строку в кавычки и экранируем внутренние кавычки, возвращаем результат
+    return code  # Если запятой нет, возвращаем строку без изменений
 
-def apply_format(code: str) -> str:
-    """
-    Применяет форматирование к коду идентификации (КИ) согласно требованиям Честного знака:
-    - Если в КИ есть запятая (,), весь КИ оборачивается в двойные кавычки (").
-    - Если в КИ есть запятая (,) и кавычки ("), весь КИ оборачивается в двойные кавычки ("), 
-      а каждая двойная кавычка внутри текста экранируется второй кавычкой (").
-    - В остальных случаях возвращает код без изменений.
-    Args:
-        code (str): Исходный DataMatrix-код.
-    Returns:
-        str: Отформатированный код.
-    """
-    if ',' in code:
-        # Если есть запятая, оборачиваем в двойные кавычки и экранируем внутренние кавычки
-        return f'"{code.replace('"', '""')}"'
-    return code
+def format_kiz_code(reports_dir: Path, input_dir: Path, upd_dir: Path, include_short_codes: bool = False) -> dict[str, list[str]]:  # Определяем функцию format_kiz_code, принимающую пути и булевый флаг, возвращающую словарь
+    formatted_codes = {}  # Инициализируем пустой словарь для хранения отформатированных кодов
+    failed_files = []  # Инициализируем пустой список для хранения имён файлов, которые не удалось обработать
 
-def format_kiz_code(reports_dir: Path, input_dir: Path, upd_dir: Path, include_short_codes: bool = False) -> dict[str, list[str]]:
-    """
-    Обрабатывает DataMatrix-коды из файлов <pdf_name>.txt в reports_dir:
-    1. Обрезает коды до 31 символа и сохраняет в input_dir/<pdf_name>.txt.
-    2. Форматирует коды (apply_format) и сохраняет в upd_dir/<pdf_name>.txt.
-    Args:
-        reports_dir (Path): Путь к директории "ИТОГ/Отчеты о нанесении" с файлами <pdf_name>.txt.
-        input_dir (Path): Путь к директории "ИТОГ/Ввод в оборот" для обрезанных кодов.
-        upd_dir (Path): Путь к директории "ИТОГ/Для УПД" для отформатированных кодов.
-        include_short_codes (bool): Если True, включает коды короче 31 символа.
-    Returns:
-        dict[str, list[str]]: Словарь, где ключ - имя PDF, а значение - список отформатированных кодов.
-    """
-    formatted_codes = {}
-    failed_files = []
+    found_files = list(reports_dir.glob("*.txt"))  # Ищем все .txt файлы в reports_dir и преобразуем в список
+    if not found_files:  # Проверяем, есть ли .txt файлы в списке
+        return formatted_codes  # Если файлов нет, возвращаем пустой словарь
 
-    #logging.info(f"Начинаю обработку кодов из: {reports_dir}")
+    try:  # Начинаем блок try для обработки исключений при создании папок
+        input_dir.mkdir(parents=True, exist_ok=True)  # Создаём папку input_dir, включая родительские, если их нет
+        upd_dir.mkdir(parents=True, exist_ok=True)  # Создаём папку upd_dir, включая родительские, если их нет
+    except OSError as e:  # Ловим ошибки ввода-вывода при создании папок
+        return formatted_codes  # В случае ошибки возвращаем пустой словарь
 
-    # Ищем файлы <pdf_name>.txt
-    found_files = list(reports_dir.glob("*.txt"))
-    if not found_files:
-        #logging.warning(f"Не найдено файлов '*.txt' в {reports_dir}")
-        return formatted_codes
+    for txt_file in found_files:  # Цикл по всем найденным .txt файлам
+        pdf_name = sanitize_filename(txt_file.stem)  # Извлекаем имя файла без расширения и очищаем его
+        short_codes = []  # Инициализируем пустой список для хранения обрезанных кодов
+        current_formatted_codes = []  # Инициализируем пустой список для хранения отформатированных кодов
 
-    # Создаём директории
-    try:
-        input_dir.mkdir(parents=True, exist_ok=True)
-        upd_dir.mkdir(parents=True, exist_ok=True)
-        #logging.info(f"Папки созданы или существуют: {input_dir}, {upd_dir}")
-    except OSError as e:
-        #logging.error(f"Ошибка при создании папок {input_dir} или {upd_dir}: {e}")
-        return formatted_codes
+        try:  # Начинаем блок try для обработки текущего файла
+            with open(txt_file, "r", encoding="utf-8") as f:  # Открываем файл для чтения в кодировке UTF-8
+                lines = f.readlines()  # Читаем все строки файла в список
+                if not lines:  # Проверяем, есть ли строки в файле
+                    continue  # Если файл пуст, пропускаем его
 
-    for txt_file in found_files:
-        pdf_name = sanitize_filename(txt_file.stem)  # Убираем .txt
-        #logging.info(f"Обрабатываю файл: {txt_file.name} (PDF: {pdf_name})")
-        short_codes = []
-        current_formatted_codes = []
+                for line_num, line in enumerate(lines, 1):  # Цикл по строкам файла с нумерацией, начиная с 1
+                    code = line.strip()  # Удаляем пробелы и переносы строки из текущей строки
+                    if not code:  # Проверяем, пустая ли строка после очистки
+                        continue  # Если строка пустая, пропускаем её
 
-        try:
-            with open(txt_file, "r", encoding="utf-8") as f:
-                lines = f.readlines()
-                if not lines:
-                    #logging.warning(f"Файл '{txt_file}' пуст. Пропускаю.")
-                    continue
+                    if len(code) >= 31:  # Проверяем, больше или равна ли длина кода 31 символу
+                        short_code = code[:31]  # Если код длинный, обрезаем его до 31 символа
+                    elif include_short_codes:  # Проверяем, включать ли короткие коды (флаг include_short_codes)
+                        short_code = code  # Если короткие коды включены, оставляем код как есть
+                    else:  # Если короткие коды не включены
+                        continue  # Пропускаем код, если он короче 31 символа
 
-                for line_num, line in enumerate(lines, 1):
-                    code = line.strip()
-                    if not code:
-                        #logging.debug(f"Пропущена пустая строка {line_num} в {txt_file.name}")
-                        continue
+                    short_codes.append(short_code)  # Добавляем обрезанный код в список short_codes
+                    formatted_code = apply_format(short_code)  # Форматируем обрезанный код с помощью apply_format
+                    current_formatted_codes.append(formatted_code)  # Добавляем отформатированный код в список current_formatted_codes
 
-                    # Обрезаем до 31 символа
-                    if len(code) >= 31:
-                        short_code = code[:31]
-                    elif include_short_codes:
-                        short_code = code
-                        #logging.warning(
-                           # f"Код короче 31 символа в {txt_file.name}, строка {line_num}: '{code}'"
-                       # )
-                    else:
-                        #logging.warning(
-                            #f"Пропущен код (<31 символ) в {txt_file.name}, строка {line_num}: '{code}'"
-                        #)
-                        continue
+            if not short_codes:  # Проверяем, есть ли обрезанные коды
+                continue  # Если кодов нет, пропускаем текущий файл
 
-                    short_codes.append(short_code)
-                    formatted_code = apply_format(short_code)
-                    current_formatted_codes.append(formatted_code)
+            short_path = input_dir / f"{pdf_name}.txt"  # Формируем путь для файла с обрезанными кодами
+            try:  # Начинаем блок try для записи обрезанных кодов
+                with open(short_path, "w", encoding="utf-8") as f:  # Открываем файл для записи в кодировке UTF-8
+                    for code in short_codes:  # Цикл по всем обрезанным кодам
+                        f.write(code + "\n")  # Записываем код в файл с переносом строки
+            except OSError as e:  # Ловим ошибки ввода-вывода при записи файла
+                failed_files.append(txt_file.name)  # Добавляем имя файла в список failed_files
+                continue  # Пропускаем текущий файл
 
-            if not short_codes:
-                #logging.warning(f"Нет подходящих кодов в {txt_file}. Файлы не созданы.")
-                continue
+            formatted_path = upd_dir / f"{pdf_name}.txt"  # Формируем путь для файла с отформатированными кодами
+            try:  # Начинаем блок try для записи отформатированных кодов
+                with open(formatted_path, "w", encoding="utf-8") as f:  # Открываем файл для записи в кодировке UTF-8
+                    for code in current_formatted_codes:  # Цикл по всем отформатированным кодам
+                        f.write(code + "\n")  # Записываем код в файл с переносом строки
+                formatted_codes[pdf_name] = current_formatted_codes  # Добавляем отформатированные коды в словарь formatted_codes
+            except OSError as e:  # Ловим ошибки ввода-вывода при записи файла
+                failed_files.append(txt_file.name)  # Добавляем имя файла в список failed_files
+                continue  # Пропускаем текущий файл
 
-            # Сохраняем обрезанные коды
-            short_path = input_dir / f"{pdf_name}.txt"
-            try:
-                with open(short_path, "w", encoding="utf-8") as f:
-                    for code in short_codes:
-                        f.write(code + "\n")
-                #logging.info(f"Сохранен файл обрезанных кодов: {short_path} ({len(short_codes)} кодов)")
-            except OSError as e:
-                #logging.error(f"Ошибка при записи {short_path}: {e}")
-                failed_files.append(txt_file.name)
-                continue
+        except FileNotFoundError:  # Ловим ошибку, если файл не найден
+            failed_files.append(txt_file.name)  # Добавляем имя файла в список failed_files
+            continue  # Пропускаем текущий файл
+        except OSError as e:  # Ловим ошибки ввода-вывода при чтении файла
+            failed_files.append(txt_file.name)  # Добавляем имя файла в список failed_files
+            continue  # Пропускаем текущий файл
+        except Exception as e:  # Ловим любые другие исключения
+            failed_files.append(txt_file.name)  # Добавляем имя файла в список failed_files
+            continue  # Пропускаем текущий файл
 
-            # Сохраняем отформатированные коды
-            formatted_path = upd_dir / f"{pdf_name}.txt"
-            try:
-                with open(formatted_path, "w", encoding="utf-8") as f:
-                    for code in current_formatted_codes:
-                        f.write(code + "\n")
-                #logging.info(f"Сохранен файл отформатированных кодов: {formatted_path} ({len(current_formatted_codes)} кодов)")
-                formatted_codes[pdf_name] = current_formatted_codes
-            except OSError as e:
-                #logging.error(f"Ошибка при записи {formatted_path}: {e}")
-                failed_files.append(txt_file.name)
-                continue
-
-        except FileNotFoundError:
-            #logging.error(f"Файл не найден: {txt_file}")
-            failed_files.append(txt_file.name)
-            continue
-        except OSError as e:
-            #logging.error(f"Ошибка при чтении {txt_file}: {e}")
-            failed_files.append(txt_file.name)
-            continue
-        except Exception as e:
-            #logging.error(f"Непредвиденная ошибка при обработке {txt_file}: {e}")
-            failed_files.append(txt_file.name)
-            continue
-
-    if failed_files:
-        logging.warning(f"Не удалось обработать файлы: {', '.join(failed_files)}")
-
-    return formatted_codes
+    return formatted_codes  # Возвращаем словарь с отформатированными кодами
