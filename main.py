@@ -84,8 +84,6 @@ def main():
         input_dir = paths["input_folder"]  # Извлекаем путь к папке Ввод в оборот
         upd_dir = paths["upd_folder"]  # Извлекаем путь к папке Для УПД
         source_dir = uploaded_pdf_dir.parent  # Устанавливаем путь к папке source как родительскую для uploaded_pdf_dir
-        setup_logging(reports_dir)  # Настраиваем логирование в папке отчётов
-        
         clear_itog_subdirs(input_dir, reports_dir, upd_dir)  # Очищаем содержимое подпапок ИТОГ
     except Exception as e:  # Ловим любые исключения при создании структуры
         logging.error(f"Не удалось создать структуру папок: {e}. Выход из программы")  # Логируем ошибку
