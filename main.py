@@ -84,6 +84,7 @@ def main():
         input_dir = paths["input_folder"]  # Извлекаем путь к папке Ввод в оборот
         upd_dir = paths["upd_folder"]  # Извлекаем путь к папке Для УПД
         source_dir = uploaded_pdf_dir.parent  # Устанавливаем путь к папке source как родительскую для uploaded_pdf_dir
+        #setup_logging(reports_dir)  # Настраиваем логирование в папке отчётов
         clear_itog_subdirs(input_dir, reports_dir, upd_dir)  # Очищаем содержимое подпапок ИТОГ
     except Exception as e:  # Ловим любые исключения при создании структуры
         logging.error(f"Не удалось создать структуру папок: {e}. Выход из программы")  # Логируем ошибку
@@ -131,15 +132,21 @@ def main():
 
     logging.info("Форматирование КИЗ-кодов...")  # Логируем начало форматирования
     try:  # Начинаем блок try для обработки исключений при форматировании
-        formatted_codes = format_kiz_code(  # Вызываем функцию форматирования кодов
-            reports_dir=reports_dir,  # Передаём путь к папке с отчётами
-            input_dir=input_dir,  # Передаём путь к папке для обрезанных кодов
-            upd_dir=upd_dir,  # Передаём путь к папке для отформатированных кодов
-            include_short_codes=True  # Указываем, что короткие коды включаются
-        )  # Закрывающая скобка вызова format_kiz_code
-        if not formatted_codes:  # Проверяем, есть ли отформатированные коды
-            logging.error("Не удалось отформатировать КИЗ-коды. Завершение работы")  # Логируем ошибку
-            return  # Выходим из функции
+        # Проверяем наличие файлов в "Отчеты о нанесении" перед форматированием
+        report_files = list(reports_dir.glob("*.txt"))  # Ищем все .txt файлы в reports_dir
+        if not report_files:  # Проверяем, есть ли файлы
+            logging.warning("Нет файлов для форматирования в 'Отчеты о нанесении'. Пропускаем шаг.")
+            formatted_codes = {}
+        else:
+            formatted_codes = format_kiz_code(  # Вызываем функцию форматирования кодов
+                reports_dir=reports_dir,  # Передаём путь к папке с отчётами
+                input_dir=input_dir,  # Передаём путь к папке для обрезанных кодов
+                upd_dir=upd_dir,  # Передаём путь к папке для отформатированных кодов
+                include_short_codes=True  # Указываем, что короткие коды включаются
+            )  # Закрывающая скобка вызова format_kiz_code
+            if not formatted_codes:  # Проверяем, есть ли отформатированные коды
+                logging.warning("Форматирование не вернуло данных. Возможна ошибка в обработке.")
+        logging.info(f"Обработано файлов: {len(formatted_codes)}")  # Логируем количество обработанных файлов
     except Exception as e:  # Ловим любые исключения при форматировании
         logging.error(f"Ошибка при форматировании кодов: {e}. Завершение работы")  # Логируем ошибку
         return  # Выходим из функции
