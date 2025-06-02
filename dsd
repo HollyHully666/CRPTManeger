@@ -1,0 +1,23 @@
+[33mcommit 2f8df402c9802452ce9c17f76a9be56dc356d26d[m[33m ([m[1;36mHEAD[m[33m -> [m[1;32mWorking[m[33m, [m[1;31morigin/Working[m[33m)[m
+Author: mrAnderson <hulinadotut@gmail.com>
+Date:   Fri May 30 13:57:03 2025 +0300
+
+    consol v 0.0.1/2 добавлено распознавание Длинны кода (укороченый или стандартный)
+
+[33mcommit 0b068312e57c4fbac94d2a1b946929e355c5063e[m
+Author: mrAnderson <hulinadotut@gmail.com>
+Date:   Fri May 30 11:29:58 2025 +0300
+
+    consol v 0.0.1/1 левый комит
+
+[33mcommit 774c8445c1f5cd17ecb6d68414b190bbf670f992[m[33m ([m[1;32mStable[m[33m)[m
+Author: mrAnderson <hulinadotut@gmail.com>
+Date:   Thu May 29 11:57:20 2025 +0300
+
+    consol v 0.0.1/1 ручной ввод данных (автоматизировано указание количества товара), добавлены коментарии к кажой строчки, удалены логи
+
+[33mcommit 8e86b3da5b0c9f8f97ca1b3876bf97d41904e566[m[33m ([m[1;31morigin/master[m[33m, [m[1;32mmaster[m[33m)[m
+Author: mrAnderson <hulinadotut@gmail.com>
+Date:   Wed May 28 13:39:51 2025 +0300
+
+    v 0.0.1

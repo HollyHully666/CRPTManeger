@@ -14,7 +14,7 @@ def _get_choice_from_options(prompt: str, options: list[tuple[str, Any]], displa
         except ValueError:  # Ловим ошибку, если ввод не является числом
             pass  # Пропускаем некорректный ввод
 
-def _get_single_product_data(file_name: str, extracted_codes_by_pdf: Dict[str, List[str]] = None, pdf_name: str = None) -> tuple[str, float, float, str, str, str]:  # Определяем функцию _get_single_product_data, принимающую имя файла, словарь кодов и имя PDF, возвращающую кортеж данных
+def _get_single_product_data(file_name: str, extracted_codes_by_pdf: Dict[str, List[str]] = None, pdf_name: str = None, code_type: str = None) -> tuple[str, float, float, str, str, str]:  # Обновляем функцию с параметром code_type
     print(f"Введите данные для файла: {file_name}")  # Выводим запрос на ввод данных для указанного файла
     name = input("Наименование товара: ").strip()  # Запрашиваем наименование товара и удаляем пробелы
     while not name:  # Проверяем, пустое ли наименование
@@ -57,16 +57,19 @@ def _get_single_product_data(file_name: str, extracted_codes_by_pdf: Dict[str, L
     ]  # Закрывающая скобка списка опций
     vat = _get_choice_from_options("Выберите ставку НДС:", vat_options)  # Запрашиваем выбор ставки НДС
 
-    code_type_options = [  # Определяем список опций для типов кодов
-        ("КИЗ", "КИЗ"),  # Опция для типа КИЗ
-        ("НомУпак", "НомУпак"),  # Опция для типа НомУпак
-        ("ИдентТрансУпак", "ИдентТрансУпак"),  # Опция для типа ИдентТрансУпак
-    ]  # Закрывающая скобка списка опций
-    code_type = _get_choice_from_options("Выберите тип кода:", code_type_options, display_key=0)  # Запрашиваем выбор типа кода с отображением первого элемента
+    # Используем переданный code_type, если он есть, иначе оставляем запрос
+    if code_type and code_type != "Неизвестный":
+        return name, price, quantity, okei, vat, code_type
+    else:
+        code_type_options = [  # Определяем список опций для типов кодов
+            ("КИЗ", "КИЗ"),  # Опция для типа КИЗ
+            ("НомУпак", "НомУпак"),  # Опция для типа НомУпак
+            ("ИдентТрансУпак", "ИдентТрансУпак"),  # Опция для типа ИдентТрансУпак
+        ]  # Закрывающая скобка списка опций
+        code_type = _get_choice_from_options("Выберите тип кода:", code_type_options, display_key=0)  # Запрашиваем выбор типа кода с отображением первого элемента
+        return name, price, quantity, okei, vat, code_type
 
-    return name, price, quantity, okei, vat, code_type  # Возвращаем кортеж с наименованием, стоимостью, количеством, ОКЕИ, НДС и типом кода
-
-def get_product_data(uploaded_pdf_dir: Path, reports_dir: Path, extracted_codes_by_pdf: Dict[str, List[str]] = None) -> Dict[str, Any]:  # Определяем функцию get_product_data, принимающую пути и словарь кодов, возвращающую словарь
+def get_product_data(uploaded_pdf_dir: Path, reports_dir: Path, extracted_codes_by_pdf: Dict[str, List[str]] = None, code_types: Dict[str, str] = None) -> Dict[str, Any]:  # Добавляем параметр code_types
     pdf_files = list(uploaded_pdf_dir.glob("*.pdf"))  # Ищем все PDF-файлы в uploaded_pdf_dir и преобразуем в список
     if not pdf_files:  # Проверяем, есть ли PDF-файлы в списке
         return {}  # Если файлов нет, возвращаем пустой словарь
@@ -85,7 +88,9 @@ def get_product_data(uploaded_pdf_dir: Path, reports_dir: Path, extracted_codes_
     single_product_choice = _get_choice_from_options("Загруженные PDF относятся к одному товару или разным?", options)  # Запрашиваем выбор типа обработки
 
     if single_product_choice == "Один товар":  # Проверяем, выбран ли вариант "Один товар"
-        data = _get_single_product_data("всех PDF-файлов", extracted_codes_by_pdf)  # Запрашиваем данные для всех PDF-файлов с передачей словаря кодов
+        # Пробуем взять общий тип кода из code_types, если есть
+        common_code_type = next(iter(code_types.values())) if code_types and code_types else None
+        data = _get_single_product_data("всех PDF-файлов", extracted_codes_by_pdf, code_type=common_code_type)
         product_data["is_single_product"] = True  # Устанавливаем флаг, что используется один товар
         product_data["all"] = data  # Сохраняем данные для всех файлов
         for pdf_name in pdf_names:  # Цикл по именам PDF-файлов
@@ -93,7 +98,8 @@ def get_product_data(uploaded_pdf_dir: Path, reports_dir: Path, extracted_codes_
     else:  # Если выбран вариант "Разные товары"
         product_data["is_single_product"] = False  # Устанавливаем флаг, что используются разные товары
         for pdf_name in pdf_names:  # Цикл по именам PDF-файлов
-            data = _get_single_product_data(pdf_name, extracted_codes_by_pdf, pdf_name)  # Запрашиваем данные для каждого PDF-файла с передачей имени PDF
+            code_type = code_types.get(pdf_name, None) if code_types else None
+            data = _get_single_product_data(pdf_name, extracted_codes_by_pdf, pdf_name, code_type)
             product_data[pdf_name] = data  # Сохраняем данные для текущего PDF-файла
 
     try:  # Начинаем блок try для обработки исключений при записи файла

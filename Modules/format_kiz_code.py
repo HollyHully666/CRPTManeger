@@ -9,26 +9,46 @@ def apply_format(code: str) -> str:  # Определяем функцию apply
         return f'"{code.replace('"', '""')}"'  # Если есть запятая, оборачиваем строку в кавычки и экранируем внутренние кавычки, возвращаем результат
     return code  # Если запятой нет, возвращаем строку без изменений
 
-def format_kiz_code(reports_dir: Path, input_dir: Path, upd_dir: Path, include_short_codes: bool = False) -> dict[str, list[str]]:  # Определяем функцию format_kiz_code, принимающую пути и булевый флаг, возвращающую словарь
+def identify_code_type(code: str) -> str:  # Функция для определения типа кода
+    # КИЗ стандартный: 01[14 цифр]21[13 букв/цифр/символов], длина 31
+    if len(code) == 31 and re.match(r'^01\d{14}21[a-zA-Z0-9!@#$%^&*()_+\-=\[\]{};:\'"<>,.?/|]{13}$', code):
+        return "КИЗ"
+    # КИЗ укороченный: 01[14 цифр]21[6 букв/цифр/символов], длина 24
+    elif len(code) == 24 and re.match(r'^01\d{14}21[a-zA-Z0-9!@#$%^&*()_+\-=\[\]{};:\'"<>,.?/|]{6}$', code):
+        return "КИЗ"
+    # НомУпак: 02[14 цифр]37[1-4 цифры], длина 19-22
+    elif 19 <= len(code) <= 22 and re.match(r'^02\d{14}37\d{1,4}$', code):
+        return "НомУпак"
+    # ИдентТрансУпак: 00[1 цифра][7-9 цифр][6-8 цифр][1 цифра], длина 18
+    elif len(code) == 18 and re.match(r'^00\d{1}\d{7,9}\d{6,8}\d{1}$', code):
+        prefix = code[3:12] if len(code[3:12]) == 9 else code[3:10]  # Префикс 7-9 цифр
+        serial = code[12:-1] if len(prefix) == 9 else code[10:-1]  # Серийный номер 6-8 цифр
+        if (len(prefix) == 9 and len(serial) == 6) or (len(prefix) == 7 and len(serial) == 8):
+            return "ИдентТрансУпак"
+    return "Неизвестный"  # Если код не соответствует ни одному типу
+
+def format_kiz_code(reports_dir: Path, input_dir: Path, upd_dir: Path, include_short_codes: bool = False) -> tuple[dict[str, list[str]], dict[str, str]]:  # Изменяем возвращаемый тип
     formatted_codes = {}  # Инициализируем пустой словарь для хранения отформатированных кодов
+    code_types = {}  # Новый словарь для хранения типов кодов по файлам
     failed_files = []  # Инициализируем пустой список для хранения имён файлов, которые не удалось обработать
 
     found_files = list(reports_dir.glob("*.txt"))  # Ищем все .txt файлы в reports_dir и преобразуем в список
     if not found_files:  # Проверяем, есть ли .txt файлы в списке
         print(f"Нет файлов в {reports_dir}")  # Отладка: выводим предупреждение
-        return formatted_codes  # Если файлов нет, возвращаем пустой словарь
+        return formatted_codes, code_types  # Возвращаем пустые словари
 
     try:  # Начинаем блок try для обработки исключений при создании папок
         input_dir.mkdir(parents=True, exist_ok=True)  # Создаём папку input_dir, включая родительские, если их нет
         upd_dir.mkdir(parents=True, exist_ok=True)  # Создаём папку upd_dir, включая родительские, если их нет
     except OSError as e:  # Ловим ошибки ввода-вывода при создании папок
         print(f"Ошибка создания папок: {e}")  # Отладка: выводим ошибку
-        return formatted_codes  # В случае ошибки возвращаем пустой словарь
+        return formatted_codes, code_types  # В случае ошибки возвращаем пустые словари
 
     for txt_file in found_files:  # Цикл по всем найденным .txt файлам
         pdf_name = sanitize_filename(txt_file.stem)  # Извлекаем имя файла без расширения и очищаем его
         short_codes = []  # Инициализируем пустой список для хранения обрезанных кодов
         current_formatted_codes = []  # Инициализируем пустой список для хранения отформатированных кодов
+        file_code_type = None  # Переменная для хранения типа кода для текущего файла
 
         try:  # Начинаем блок try для обработки текущего файла
             with open(txt_file, "r", encoding="utf-8") as f:  # Открываем файл для чтения в кодировке UTF-8
@@ -59,6 +79,15 @@ def format_kiz_code(reports_dir: Path, input_dir: Path, upd_dir: Path, include_s
                         print(f"Код не распознан: {repr(code)}")  # Отладка: выводим нераспознанный код
                         continue  # Пропускаем код
 
+                    # Определяем тип кода
+                    current_code_type = identify_code_type(short_code)
+                    print(f"Тип кода: {current_code_type}")  # Отладка: выводим тип кода
+                    if file_code_type is None:  # Если тип ещё не определён
+                        file_code_type = current_code_type
+                    elif file_code_type != current_code_type:  # Проверяем, совпадает ли тип с предыдущими
+                        print(f"Несоответствие типов кодов в {txt_file}: {file_code_type} и {current_code_type}")
+                        continue  # Пропускаем, если типы не совпадают
+
                     short_codes.append(short_code)  # Добавляем обрезанный код в список short_codes
                     formatted_code = apply_format(short_code)  # Форматируем обрезанный код с помощью apply_format
                     current_formatted_codes.append(formatted_code)  # Добавляем отформатированный код в список current_formatted_codes
@@ -83,6 +112,8 @@ def format_kiz_code(reports_dir: Path, input_dir: Path, upd_dir: Path, include_s
                     for code in current_formatted_codes:  # Цикл по всем отформатированным кодам
                         f.write(code + "\n")  # Записываем код в файл с переносом строки
                 formatted_codes[pdf_name] = current_formatted_codes  # Добавляем отформатированные коды в словарь formatted_codes
+                if file_code_type:  # Если тип кода определён
+                    code_types[pdf_name] = file_code_type  # Сохраняем тип кода для файла
             except OSError as e:  # Ловим ошибки ввода-вывода при записи файла
                 print(f"Ошибка записи в {formatted_path}: {e}")  # Отладка: выводим ошибку
                 failed_files.append(txt_file.name)  # Добавляем имя файла в список failed_files
@@ -101,4 +132,4 @@ def format_kiz_code(reports_dir: Path, input_dir: Path, upd_dir: Path, include_s
             failed_files.append(txt_file.name)  # Добавляем имя файла в список failed_files
             continue  # Пропускаем текущий файл
 
-    return formatted_codes  # Возвращаем словарь с отформатированными кодами
+    return formatted_codes, code_types  # Возвращаем отформатированные коды и типы кодов
