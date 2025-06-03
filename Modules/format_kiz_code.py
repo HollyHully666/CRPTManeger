@@ -23,23 +23,15 @@ def identify_code_type(code: str) -> str:
             return "ИдентТрансУпак"
     return "Неизвестный"
 
-def format_kiz_code(extracted_codes_by_pdf: dict[str, list[str]], input_dir: Path, upd_dir: Path, include_short_codes: bool = False, write_input: bool = True, write_upd: bool = True) -> tuple[dict[str, list[str]], dict[str, str]]:
-    formatted_codes = {}
+def format_kiz_code(extracted_codes_by_pdf: dict[str, list[str]], include_short_codes: bool = False) -> tuple[dict[str, list[str]], dict[str, list[str]], dict[str, str]]:
+    short_codes_dict = {}  # Для Ввод в оборот (только обрезанные коды)
+    formatted_codes_dict = {}  # Для Для УПД (обрезанные + apply_format)
     code_types = {}
     failed_files = []
 
     if not extracted_codes_by_pdf:
         print("Нет извлечённых кодов для обработки")
-        return formatted_codes, code_types
-
-    try:
-        if write_input:
-            input_dir.mkdir(parents=True, exist_ok=True)
-        if write_upd:
-            upd_dir.mkdir(parents=True, exist_ok=True)
-    except OSError as e:
-        print(f"Ошибка создания папок: {e}")
-        return formatted_codes, code_types
+        return short_codes_dict, formatted_codes_dict, code_types
 
     for pdf_name, codes in extracted_codes_by_pdf.items():
         pdf_name = sanitize_filename(pdf_name)
@@ -81,38 +73,17 @@ def format_kiz_code(extracted_codes_by_pdf: dict[str, list[str]], input_dir: Pat
                 print(f"Несоответствие типов кодов для {pdf_name}: {file_code_type} и {current_code_type}")
                 continue
 
-            short_codes.append(short_code)
-            formatted_code = apply_format(short_code)
+            short_codes.append(short_code)  # Сохраняем обрезанный код
+            formatted_code = apply_format(short_code)  # Форматируем для УПД
             current_formatted_codes.append(formatted_code)
 
         if not short_codes:
             print(f"Нет обработанных кодов для {pdf_name}")
             continue
 
-        if write_input:
-            short_path = input_dir / f"{pdf_name}.txt"
-            try:
-                with open(short_path, "w", encoding="utf-8") as f:
-                    for code in short_codes:
-                        f.write(code + "\n")
-            except OSError as e:
-                print(f"Ошибка записи в {short_path}: {e}")
-                failed_files.append(pdf_name)
-                continue
-
-        if write_upd:
-            formatted_path = upd_dir / f"{pdf_name}.txt"
-            try:
-                with open(formatted_path, "w", encoding="utf-8") as f:
-                    for code in current_formatted_codes:
-                        f.write(code + "\n")
-            except OSError as e:
-                print(f"Ошибка записи в {formatted_path}: {e}")
-                failed_files.append(pdf_name)
-                continue
-
-        formatted_codes[pdf_name] = current_formatted_codes
+        short_codes_dict[pdf_name] = short_codes
+        formatted_codes_dict[pdf_name] = current_formatted_codes
         if file_code_type:
             code_types[pdf_name] = file_code_type
 
-    return formatted_codes, code_types
+    return short_codes_dict, formatted_codes_dict, code_types

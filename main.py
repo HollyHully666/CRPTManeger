@@ -77,17 +77,17 @@ def clear_itog_subdirs(input_dir: Path, reports_dir: Path, upd_dir: Path) -> Non
         except Exception as e:
             logging.error(f"Ошибка при очистке {dir_path}: {e}")
 
-def save_to_xlsx(formatted_codes: dict, input_dir: Path):
-    for pdf_name, codes in formatted_codes.items():
-        df = pd.DataFrame(codes, columns=["Код"])
+def save_to_xlsx(codes_dict: dict, input_dir: Path):
+    for pdf_name, codes in codes_dict.items():
+        df = pd.DataFrame(codes)
         xlsx_path = input_dir / f"{pdf_name}.xlsx"
-        df.to_excel(xlsx_path, index=False)
+        df.to_excel(xlsx_path, index=False, header=False)
 
 def save_to_csv(extracted_codes: dict, reports_dir: Path):
     for pdf_name, codes in extracted_codes.items():
-        df = pd.DataFrame(codes, columns=["Код"])
+        df = pd.DataFrame(codes)
         csv_path = reports_dir / f"{pdf_name}.csv"
-        df.to_csv(csv_path, index=False, encoding="utf-8")
+        df.to_csv(csv_path, index=False, header=False, encoding="utf-8")
 
 def main():
     try:
@@ -124,7 +124,7 @@ def main():
         logging.error(f"Ошибка при конвертации PDF: {e}. Завершение работы")
         return
 
-    choice = input("Что хотите получить на выходе?\n (1) Файлы для Ввода в оборот\n (2) Файлы для отчета о нанесении\n (3) Шаблон для загрузки УПД\n (4) Все сразу\n (Укажите через пробел, например: 1 3):\n ")
+    choice = input("Что хотите получить на выходе? (1) Файлы для Ввода в оборот, (2) Файлы для отчета о нанесении, (3) Шаблон для загрузки УПД, (4) Все сразу (через пробел, например: 1 3): ")
     choices = [int(x) for x in choice.split() if x.isdigit()]
     if not choices:
         logging.error("Неверный ввод. Завершение работы")
@@ -136,8 +136,7 @@ def main():
 
     logging.info("Распознавание DataMatrix-кодов...")
     try:
-        write_reports = 2 in choices
-        extracted_codes_by_pdf = extract_datamatrix_from_image(data_matrix_dir=data_matrix_dir, reports_dir=reports_dir, write_reports=write_reports)
+        extracted_codes_by_pdf = extract_datamatrix_from_image(data_matrix_dir=data_matrix_dir, reports_dir=reports_dir)
         if not extracted_codes_by_pdf:
             logging.error("Не удалось извлечь DataMatrix-коды. Завершение работы")
             return
@@ -146,15 +145,14 @@ def main():
         logging.error(f"Ошибка при извлечении кодов: {e}. Завершение работы")
         return
 
-    formatted_codes = {}
+    short_codes_dict = {}  # Для Ввод в оборот
+    formatted_codes_dict = {}  # Для Для УПД
     code_types = {}
     if 1 in choices or 3 in choices:
         logging.info("Форматирование КИЗ-кодов...")
         try:
-            write_input = 1 in choices
-            write_upd = 3 in choices
-            formatted_codes, code_types = format_kiz_code(extracted_codes_by_pdf=extracted_codes_by_pdf, input_dir=input_dir, upd_dir=upd_dir, include_short_codes=True, write_input=write_input, write_upd=write_upd)
-            if not formatted_codes:
+            short_codes_dict, formatted_codes_dict, code_types = format_kiz_code(extracted_codes_by_pdf=extracted_codes_by_pdf, include_short_codes=True)
+            if not short_codes_dict:
                 logging.error("Форматирование не вернуло данных. Завершение работы")
                 return
         except Exception as e:
@@ -162,7 +160,7 @@ def main():
             return
 
     if 1 in choices:
-        save_to_xlsx(formatted_codes, input_dir)
+        save_to_xlsx(short_codes_dict, input_dir)
         logging.info(f"Сохранено в XLSX в {input_dir}")
 
     if 2 in choices:
@@ -183,7 +181,7 @@ def main():
         logging.info("Генерация итогового CSV...")
         try:
             output_csv_path = upd_dir / "final_upd.csv"
-            generate_final_csv(reports_dir=reports_dir, upd_dir=upd_dir, output_path=output_csv_path)
+            generate_final_csv(formatted_codes=formatted_codes_dict, product_data=product_data, upd_dir=upd_dir, output_path=output_csv_path)
         except Exception as e:
             logging.error(f"Ошибка при создании CSV: {e}. Завершение работы")
             return
