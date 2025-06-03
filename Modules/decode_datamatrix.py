@@ -20,7 +20,7 @@ def _decode_image(image_path: Path) -> Tuple[str, List[str]]:
     except Exception as e:
         return image_path.name, []
 
-def extract_datamatrix_from_image(data_matrix_dir: Path, reports_dir: Path, write_reports: bool = True) -> Dict[str, List[str]]:
+def extract_datamatrix_from_image(data_matrix_dir: Path, reports_dir: Path) -> Dict[str, List[str]]:
     extracted_codes_by_pdf = {}
 
     pdf_dirs = [d for d in data_matrix_dir.iterdir() if d.is_dir()]
@@ -47,16 +47,7 @@ def extract_datamatrix_from_image(data_matrix_dir: Path, reports_dir: Path, writ
                 if image_codes:
                     codes.extend(image_codes)
 
-        if codes and write_reports:
-            extracted_codes_by_pdf[pdf_name] = codes
-            output_file = reports_dir / f"{pdf_name}.txt"
-            try:
-                output_file.parent.mkdir(parents=True, exist_ok=True)
-                with open(output_file, "w", encoding="utf-8") as f:
-                    f.write("\n".join(codes))
-            except OSError as e:
-                pass
-        elif codes:
+        if codes:
             extracted_codes_by_pdf[pdf_name] = codes
 
     return extracted_codes_by_pdf
