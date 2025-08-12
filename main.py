@@ -1,93 +1,93 @@
-from pathlib import Path
-import logging
-import logging.handlers
-from datetime import datetime
-import shutil
-import tkinter as tk
-from tkinter import filedialog
-from typing import List
+from pathlib import Path  # Импорт Path для работы с путями файловой системы
+import logging  # Модуль для логирования
+import logging.handlers  # Дополнительные обработчики логов (например, ротация файлов)
+from datetime import datetime  # Дата и время для меток и имён файлов
+import shutil  # Операции с файлами и папками (копирование, удаление)
+import tkinter as tk  # Библиотека Tkinter для GUI
+from tkinter import filedialog  # Диалог выбора файлов
+from typing import List  # Аннотация типа: список
 
-from Modules.createOutputStructure import create_output_structure
-from Modules.pdf_to_png import convert_pdf_to_images
-from Modules.decode_datamatrix import extract_datamatrix_from_image
-from Modules.format_kiz_code import format_kiz_code
-from Modules.get_product_data import get_product_data
-from Modules.generate_final_csv import generate_final_csv
-import pandas as pd
+from Modules.createOutputStructure import create_output_structure  # Создание структуры выходных папок
+from Modules.pdf_to_png import convert_pdf_to_images  # Конвертация PDF в изображения PNG
+from Modules.decode_datamatrix import extract_datamatrix_from_image  # Извлечение DataMatrix-кодов с изображений
+from Modules.format_kiz_code import format_kiz_code  # Форматирование КИЗ-кодов
+from Modules.get_product_data import get_product_data  # Получение данных о товарах
+from Modules.generate_final_csv import generate_final_csv  # Генерация итогового CSV для УПД
+import pandas as pd  # Работа с табличными данными
 
-def setup_logging(log_dir: Path) -> None:
-    log_dir.mkdir(parents=True, exist_ok=True)
-    log_file = log_dir / f"log_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
-    logger = logging.getLogger()
-    if not logger.handlers:
-        logger.setLevel(logging.INFO)
-        log_format = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
-        console_handler = logging.StreamHandler()
-        console_handler.setFormatter(log_format)
-        logger.addHandler(console_handler)
-        file_handler = logging.handlers.RotatingFileHandler(log_file, maxBytes=10*1024*1024, backupCount=5)
-        file_handler.setFormatter(log_format)
-        logger.addHandler(file_handler)
+def setup_logging(log_dir: Path) -> None:  # Настройка логирования (консоль + файл с ротацией)
+    log_dir.mkdir(parents=True, exist_ok=True)  # Создаём директорию для логов, если её нет
+    log_file = log_dir / f"log_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"  # Имя файла лога с меткой времени
+    logger = logging.getLogger()  # Получаем корневой логгер
+    if not logger.handlers:  # Добавляем обработчики только один раз
+        logger.setLevel(logging.INFO)  # Устанавливаем уровень логирования INFO
+        log_format = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')  # Формат сообщения лога
+        console_handler = logging.StreamHandler()  # Обработчик вывода в консоль
+        console_handler.setFormatter(log_format)  # Применяем формат для консоли
+        logger.addHandler(console_handler)  # Регистрируем обработчик консоли
+        file_handler = logging.handlers.RotatingFileHandler(log_file, maxBytes=10*1024*1024, backupCount=5)  # Файловый обработчик с ротацией
+        file_handler.setFormatter(log_format)  # Применяем формат для файла
+        logger.addHandler(file_handler)  # Регистрируем файловый обработчик
 
-def select_pdf_files() -> List[Path]:
-    root = tk.Tk()
-    root.withdraw()
-    file_paths = filedialog.askopenfilenames(title="Выберите PDF-файлы", filetypes=[("PDF files", "*.pdf")])
-    root.destroy()
-    return [Path(p) for p in file_paths]
+def select_pdf_files() -> List[Path]:  # Диалог выбора PDF-файлов, возвращает список путей
+    root = tk.Tk()  # Создаём корневое окно Tkinter
+    root.withdraw()  # Скрываем главное окно, чтобы не мешало
+    file_paths = filedialog.askopenfilenames(title="Выберите PDF-файлы", filetypes=[("PDF files", "*.pdf")])  # Диалог выбора нескольких PDF
+    root.destroy()  # Уничтожаем окно после выбора
+    return [Path(p) for p in file_paths]  # Преобразуем строки в объекты Path
 
-def copy_pdf_to_uploaded_dir(pdf_files: List[Path], uploaded_pdf_dir: Path) -> None:
-    uploaded_pdf_dir.mkdir(parents=True, exist_ok=True)
-    for item in uploaded_pdf_dir.iterdir():
-        if item.is_file():
+def copy_pdf_to_uploaded_dir(pdf_files: List[Path], uploaded_pdf_dir: Path) -> None:  # Копирование выбранных PDF в служебную папку
+    uploaded_pdf_dir.mkdir(parents=True, exist_ok=True)  # Создаём папку, если её нет
+    for item in uploaded_pdf_dir.iterdir():  # Очищаем папку от предыдущего содержимого
+        if item.is_file():  # Если это файл — удаляем
             item.unlink()
-        elif item.is_dir():
+        elif item.is_dir():  # Если это поддиректория — удаляем рекурсивно
             shutil.rmtree(item)
-    for pdf_file in pdf_files:
+    for pdf_file in pdf_files:  # Перебираем все выбранные PDF
         try:
-            dest_path = uploaded_pdf_dir / pdf_file.name
-            shutil.copy(pdf_file, dest_path)
+            dest_path = uploaded_pdf_dir / pdf_file.name  # Путь, куда копировать
+            shutil.copy(pdf_file, dest_path)  # Копируем файл
         except Exception as e:
-            logging.error(f"Ошибка при копировании {pdf_file}: {e}")
+            logging.error(f"Ошибка при копировании {pdf_file}: {e}")  # Логируем любую ошибку копирования
 
-def clear_source_dir(source_dir: Path) -> None:
+def clear_source_dir(source_dir: Path) -> None:  # Полная очистка и пересоздание служебной директории
     try:
-        if source_dir.exists():
-            shutil.rmtree(source_dir)
-            logging.info(f"Папка {source_dir} очищена")
-        create_output_structure()
-        logging.info(f"Папка {source_dir} пересоздана")
+        if source_dir.exists():  # Если директория существует
+            shutil.rmtree(source_dir)  # Удаляем её рекурсивно
+            logging.info(f"Папка {source_dir} очищена")  # Сообщаем об очистке
+        create_output_structure()  # Пересоздаём стандартную структуру папок
+        logging.info(f"Папка {source_dir} пересоздана")  # Сообщаем о пересоздании
     except Exception as e:
-        logging.error(f"Ошибка при очистке {source_dir}: {e}")
+        logging.error(f"Ошибка при очистке {source_dir}: {e}")  # Логируем ошибку
 
-def clear_itog_subdirs(input_dir: Path, reports_dir: Path, upd_dir: Path) -> None:
-    logger = logging.getLogger()
-    for handler in logger.handlers[:]:
-        handler.close()
-        logger.removeHandler(handler)
-    for dir_path in [input_dir, reports_dir, upd_dir]:
+def clear_itog_subdirs(input_dir: Path, reports_dir: Path, upd_dir: Path) -> None:  # Очистка подпапок в каталоге ИТОГ
+    logger = logging.getLogger()  # Текущий логгер
+    for handler in logger.handlers[:]:  # Закрываем и снимаем обработчики (важно на Windows)
+        handler.close()  # Закрыть обработчик
+        logger.removeHandler(handler)  # Удалить из логгера
+    for dir_path in [input_dir, reports_dir, upd_dir]:  # Перебираем целевые папки
         try:
-            if dir_path.exists():
-                for item in dir_path.iterdir():
-                    if item.is_file():
-                        item.unlink()
-                    elif item.is_dir():
-                        shutil.rmtree(item)
-                logging.info(f"Содержимое папки {dir_path} очищено")
+            if dir_path.exists():  # Если папка существует
+                for item in dir_path.iterdir():  # Перебираем содержимое
+                    if item.is_file():  # Это файл
+                        item.unlink()  # Удаляем файл
+                    elif item.is_dir():  # Это папка
+                        shutil.rmtree(item)  # Удаляем папку рекурсивно
+                logging.info(f"Содержимое папки {dir_path} очищено")  # Сообщаем об очистке
         except Exception as e:
-            logging.error(f"Ошибка при очистке {dir_path}: {e}")
+            logging.error(f"Ошибка при очистке {dir_path}: {e}")  # Логируем ошибку
 
-def save_to_xlsx(codes_dict: dict, input_dir: Path):
-    for pdf_name, codes in codes_dict.items():
-        df = pd.DataFrame(codes)
-        xlsx_path = input_dir / f"{pdf_name}.xlsx"
-        df.to_excel(xlsx_path, index=False, header=False)
+def save_to_xlsx(codes_dict: dict, input_dir: Path):  # Сохранение коротких кодов в XLSX (для ввода в оборот)
+    for pdf_name, codes in codes_dict.items():  # Перебор PDF и их списков кодов
+        df = pd.DataFrame(codes)  # Создание DataFrame из списка
+        xlsx_path = input_dir / f"{pdf_name}.xlsx"  # Путь к выходному файлу XLSX
+        df.to_excel(xlsx_path, index=False, header=False)  # Сохранение без индексов и заголовков
 
-def save_to_csv(extracted_codes: dict, reports_dir: Path):
-    for pdf_name, codes in extracted_codes.items():
-        df = pd.DataFrame(codes)
-        csv_path = reports_dir / f"{pdf_name}.csv"
-        df.to_csv(csv_path, index=False, header=False, encoding="utf-8")
+def save_to_csv(extracted_codes: dict, reports_dir: Path):  # Сохранение распознанных кодов в CSV (отчёт о нанесении)
+    for pdf_name, codes in extracted_codes.items():  # Перебор PDF и соответствующих кодов
+        df = pd.DataFrame(codes)  # Преобразуем список в DataFrame
+        csv_path = reports_dir / f"{pdf_name}.csv"  # Путь к выходному CSV
+        df.to_csv(csv_path, index=False, header=False, encoding="utf-8")  # Сохраняем CSV
 
 def main():
     try:
@@ -140,7 +140,7 @@ def main():
         if not extracted_codes_by_pdf:
             logging.error("Не удалось извлечь DataMatrix-коды. Завершение работы")
             return
-        logging.info(f"Извлечено кодов: {sum(len(codes) for codes in extracted_codes_by_pdf.values())}")
+        #logging.info(f"Извлечено кодов: {sum(len(codes) for codes in extracted_codes_by_pdf.values())}")
     except Exception as e:
         logging.error(f"Ошибка при извлечении кодов: {e}. Завершение работы")
         return
