@@ -241,14 +241,24 @@ def merge_input_xlsx_files(input_dir: Path) -> None:  # Объединение X
 
 
 def save_full_codes(extracted_codes_by_pdf: dict, full_codes_dir: Path) -> None:
-    """Сохраняет полные (сырые) коды сразу после сканирования в папку «Полные коды» — по одному файлу на PDF."""
+    """Сохраняет полные (сырые) коды сразу после сканирования в папку «Полные коды».
+
+    - По одному файлу на PDF
+    - И один общий файл со всеми кодами
+    """
     full_codes_dir.mkdir(parents=True, exist_ok=True)
+    all_codes_path = full_codes_dir / "_all_full_codes.txt"
+    all_codes: list[str] = []
     for pdf_name, codes in extracted_codes_by_pdf.items():
         path = full_codes_dir / f"{pdf_name}.txt"
         with open(path, "w", encoding="utf-8") as f:
             for code in codes:
                 line = (code.strip() if code else "") + "\n"
                 f.write(line)
+                all_codes.append(line)
+
+    with open(all_codes_path, "w", encoding="utf-8") as f:
+        f.writelines(all_codes)
     logging.info(f"Полные коды сохранены в {full_codes_dir}")
 
 
