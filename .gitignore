@@ -1,0 +1,24 @@
+# Ignore everything by default (this repo is embedded in a larger workspace)
+*
+
+# Keep repo metadata
+!.gitignore
+
+# Keep project source code
+!main.py
+!merge_input_xlsx.py
+!merge_reports_csv.py
+!Modules/
+!Modules/**
+
+# Common Python artifacts
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+env/
+.env
+

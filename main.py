@@ -1,120 +1,326 @@
-from pathlib import Path
-import logging
-import logging.handlers
-from datetime import datetime
-import shutil
-import tkinter as tk
-from tkinter import filedialog
-from typing import List
+from pathlib import Path  # Импорт Path для работы с путями файловой системы
+import logging  # Модуль для логирования
+import logging.handlers  # Дополнительные обработчики логов (например, ротация файлов)
+from datetime import datetime  # Дата и время для меток и имён файлов
+import shutil  # Операции с файлами и папками (копирование, удаление)
+import tkinter as tk  # Библиотека Tkinter для GUI
+from tkinter import filedialog  # Диалог выбора файлов
+from typing import List  # Аннотация типа: список
 
-from Modules.createOutputStructure import create_output_structure
-from Modules.pdf_to_png import convert_pdf_to_images
-from Modules.decode_datamatrix import extract_datamatrix_from_image
-from Modules.format_kiz_code import format_kiz_code
-from Modules.get_product_data import get_product_data
-from Modules.generate_final_csv import generate_final_csv
+from Modules.createOutputStructure import create_output_structure  # Создание структуры выходных папок
+from Modules.pdf_to_png import convert_pdf_to_images  # Конвертация PDF в изображения PNG
+from Modules.decode_datamatrix import extract_datamatrix_from_image  # Извлечение DataMatrix-кодов с изображений
+from Modules.format_kiz_code import format_kiz_code  # Форматирование КИЗ-кодов
+from Modules.get_product_data import get_product_data  # Получение данных о товарах
+from Modules.generate_final_csv import generate_final_csv  # Генерация итогового CSV для УПД
+import pandas as pd  # Работа с табличными данными
 
-def setup_logging(log_dir: Path) -> None:
-    log_dir.mkdir(parents=True, exist_ok=True)
-    log_file = log_dir / f"log_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
-    logger = logging.getLogger()
-    if not logger.handlers:
-        logger.setLevel(logging.INFO)
-        log_format = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
-        console_handler = logging.StreamHandler()
-        console_handler.setFormatter(log_format)
-        logger.addHandler(console_handler)
-        file_handler = logging.handlers.RotatingFileHandler(log_file, maxBytes=10*1024*1024, backupCount=5)
-        file_handler.setFormatter(log_format)
-        logger.addHandler(file_handler)
+# Максимальное количество кодов в одном шаблоне (ограничение Честного знака)
+MAX_CODES_PER_TEMPLATE = 30000
 
-def select_pdf_files() -> List[Path]:
+def setup_logging(log_dir: Path) -> None:  # Настройка логирования (консоль + файл с ротацией)
+    log_dir.mkdir(parents=True, exist_ok=True)  # Создаём директорию для логов, если её нет
+    log_file = log_dir / f"log_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"  # Имя файла лога с меткой времени
+    logger = logging.getLogger()  # Получаем корневой логгер
+    if not logger.handlers:  # Добавляем обработчики только один раз
+        logger.setLevel(logging.INFO)  # Устанавливаем уровень логирования INFO
+        log_format = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')  # Формат сообщения лога
+        console_handler = logging.StreamHandler()  # Обработчик вывода в консоль
+        console_handler.setFormatter(log_format)  # Применяем формат для консоли
+        logger.addHandler(console_handler)  # Регистрируем обработчик консоли
+        file_handler = logging.handlers.RotatingFileHandler(log_file, maxBytes=10*1024*1024, backupCount=5)  # Файловый обработчик с ротацией
+        file_handler.setFormatter(log_format)  # Применяем формат для файла
+        logger.addHandler(file_handler)  # Регистрируем файловый обработчик
+
+def _prepare_file_dialog_root():
+    """Создаёт окно Tk для диалога и поднимает его поверх остальных (чтобы не терялось за консолью)."""
     root = tk.Tk()
     root.withdraw()
-    file_paths = filedialog.askopenfilenames(
-        title="Выберите PDF-файлы",
-        filetypes=[("PDF files", "*.pdf")]
-    )
-    root.destroy()
-    return [Path(p) for p in file_paths]
+    root.attributes("-topmost", True)
+    root.update_idletasks()
+    root.lift()
+    root.focus_force()
+    root.update()
+    return root
+
+
+def select_pdf_files() -> List[Path]:
+    root = _prepare_file_dialog_root()
+    try:
+        file_paths = filedialog.askopenfilenames(
+            title="Выберите PDF-файлы",
+            filetypes=[("PDF files", "*.pdf")],
+            parent=root,
+        )
+        return [Path(p) for p in file_paths] if file_paths else []
+    finally:
+        root.destroy()
+
+
+def select_pdf_folders() -> List[Path]:
+    root = _prepare_file_dialog_root()
+    folders: List[Path] = []
+    try:
+        while True:
+            folder = filedialog.askdirectory(
+                title="Выберите папку с PDF (Отмена — закончить выбор папок)",
+                parent=root,
+            )
+            if not folder:
+                break
+            p = Path(folder)
+            if p not in folders:
+                folders.append(p)
+    finally:
+        root.destroy()
+    if not folders:
+        return []
+    seen: set[Path] = set()
+    result: List[Path] = []
+    for folder in folders:
+        for pdf_path in sorted(folder.glob("*.pdf")):
+            if pdf_path not in seen:
+                seen.add(pdf_path)
+                result.append(pdf_path)
+    return result
+
 
 def copy_pdf_to_uploaded_dir(pdf_files: List[Path], uploaded_pdf_dir: Path) -> None:
+    """Копирует PDF в служебную папку, переименовывая по порядку (1.pdf, 2.pdf, ...).
+    Так одноимённые файлы из разных папок не перезаписывают друг друга.
+    Пример: папка «Январь» содержит отчёт.pdf (100 кодов), папка «Февраль» — тоже отчёт.pdf (200 кодов).
+    Без переименования второй файл затёр бы первый; с переименованием получаем 1.pdf и 2.pdf — оба обрабатываются."""
     uploaded_pdf_dir.mkdir(parents=True, exist_ok=True)
-    # Очищаем папку ЗагруженныеPDF
     for item in uploaded_pdf_dir.iterdir():
         if item.is_file():
             item.unlink()
         elif item.is_dir():
             shutil.rmtree(item)
-    # Копируем выбранные файлы
-    for pdf_file in pdf_files:
+    for i, pdf_file in enumerate(pdf_files, start=1):
         try:
-            dest_path = uploaded_pdf_dir / pdf_file.name
+            dest_path = uploaded_pdf_dir / f"{i}.pdf"
             shutil.copy(pdf_file, dest_path)
+            logging.info(f"  [{i}] {pdf_file.name} -> {dest_path.name}")
         except Exception as e:
             logging.error(f"Ошибка при копировании {pdf_file}: {e}")
 
-def clear_source_dir(source_dir: Path) -> None:
-    """Очищает папку source и пересоздаёт структуру."""
+def clear_source_dir(source_dir: Path) -> None:  # Полная очистка и пересоздание служебной директории
     try:
-        if source_dir.exists():
-            shutil.rmtree(source_dir)
-            logging.info(f"Папка {source_dir} очищена")
-        # Пересоздаём структуру
-        create_output_structure()
-        logging.info(f"Папка {source_dir} пересоздана")
+        if source_dir.exists():  # Если директория существует
+            shutil.rmtree(source_dir)  # Удаляем её рекурсивно
+            logging.info(f"Папка {source_dir} очищена")  # Сообщаем об очистке
+        create_output_structure()  # Пересоздаём стандартную структуру папок
+        logging.info(f"Папка {source_dir} пересоздана")  # Сообщаем о пересоздании
     except Exception as e:
-        logging.error(f"Ошибка при очистке {source_dir}: {e}")
+        logging.error(f"Ошибка при очистке {source_dir}: {e}")  # Логируем ошибку
 
-def clear_itog_subdirs(input_dir: Path, reports_dir: Path, upd_dir: Path) -> None:
-    """Очищает содержимое подпапок в ИТОГ, сохраняя сами папки."""
-    for dir_path in [input_dir, reports_dir, upd_dir]:
+def clear_itog_subdirs(full_codes_dir: Path, input_dir: Path, reports_dir: Path, upd_dir: Path) -> None:
+    logger = logging.getLogger()
+    for handler in logger.handlers[:]:
+        handler.close()
+        logger.removeHandler(handler)
+    for dir_path in [full_codes_dir, input_dir, reports_dir, upd_dir]:
         try:
-            if dir_path.exists():
-                for item in dir_path.iterdir():
-                    if item.is_file():
-                        item.unlink()
-                    elif item.is_dir():
-                        shutil.rmtree(item)
-                logging.info(f"Содержимое папки {dir_path} очищено")
+            if dir_path.exists():  # Если папка существует
+                for item in dir_path.iterdir():  # Перебираем содержимое
+                    if item.is_file():  # Это файл
+                        item.unlink()  # Удаляем файл
+                    elif item.is_dir():  # Это папка
+                        shutil.rmtree(item)  # Удаляем папку рекурсивно
+                logging.info(f"Содержимое папки {dir_path} очищено")  # Сообщаем об очистке
         except Exception as e:
-            logging.error(f"Ошибка при очистке {dir_path}: {e}")
+            logging.error(f"Ошибка при очистке {dir_path}: {e}")  # Логируем ошибку
+
+def _chunk_list(lst: list, chunk_size: int):
+    """Разбивает список на части не больше chunk_size элементов."""
+    for i in range(0, len(lst), chunk_size):
+        yield lst[i : i + chunk_size]
+
+
+def _normalize_code_for_duplicate(raw_code: str) -> str | None:
+    """Приводит сырой код к короткой форме (как в format_kiz_code) для сравнения дубликатов."""
+    code = raw_code.strip()
+    if not code:
+        return None
+    gs_index = code.find("\x1D")
+    if gs_index == 24:
+        return code[:24]
+    if gs_index == 31:
+        return code[:31]
+    if len(code) < 24:
+        return code
+    return code[:31] if len(code) >= 31 else code
+
+
+def collect_duplicate_report(extracted_codes_by_pdf: dict[str, list]) -> dict:
+    """
+    Анализирует коды по PDF и находит дубликаты.
+    Возвращает словарь: {
+        "by_code": { normalized_code: { "pdf_name": count, ... }, ... },  # только коды с повторами
+        "unique_duplicated_count": int,   # сколько уникальных кодов встречались > 1 раза
+        "total_duplicate_occurrences": int,  # сколько лишних вхождений (сумма (n-1) по каждому коду)
+        "pdfs_with_duplicates": set,     # в каких PDF есть хотя бы один дубликат
+    }
+    """
+    code_occurrences: dict[str, dict[str, int]] = {}
+    for pdf_name, codes in extracted_codes_by_pdf.items():
+        for code in codes:
+            short = _normalize_code_for_duplicate(code)
+            if not short:
+                continue
+            code_occurrences.setdefault(short, {})
+            code_occurrences[short][pdf_name] = code_occurrences[short].get(pdf_name, 0) + 1
+
+    duplicated = {
+        code: pdf_counts
+        for code, pdf_counts in code_occurrences.items()
+        if sum(pdf_counts.values()) > 1
+    }
+
+    total_duplicate_occurrences = sum(
+        sum(pdf_counts.values()) - 1 for pdf_counts in duplicated.values()
+    )
+    pdfs_with_duplicates = set()
+    for pdf_counts in duplicated.values():
+        pdfs_with_duplicates.update(pdf_counts.keys())
+
+    return {
+        "by_code": duplicated,
+        "unique_duplicated_count": len(duplicated),
+        "total_duplicate_occurrences": total_duplicate_occurrences,
+        "pdfs_with_duplicates": sorted(pdfs_with_duplicates),
+    }
+
+
+def log_duplicate_report(duplicate_report: dict) -> None:
+    """Пишет в лог сводку по дубликатам кодов."""
+    if not duplicate_report["by_code"]:
+        logging.info("Дубликатов кодов не обнаружено.")
+        return
+    dup = duplicate_report
+    logging.info("--- Отчёт о дубликатах кодов ---")
+    logging.info(f"Уникальных кодов с повторениями: {dup['unique_duplicated_count']}")
+    logging.info(f"Всего лишних вхождений (дубликатов): {dup['total_duplicate_occurrences']}")
+    logging.info(f"Дубликаты найдены в PDF-файлах: {', '.join(dup['pdfs_with_duplicates'])}")
+    for code, pdf_counts in list(dup["by_code"].items())[:20]:  # первые 20 кодов детально
+        parts = [f"{name}: {cnt}" for name, cnt in sorted(pdf_counts.items())]
+        logging.info(f"  Код …{code[-8:]}: {', '.join(parts)}")
+    if len(dup["by_code"]) > 20:
+        logging.info(f"  ... и ещё {len(dup['by_code']) - 20} кодов с дубликатами.")
+    logging.info("--------------------------------")
+
+
+def save_to_xlsx(codes_dict: dict, input_dir: Path):  # Сохранение коротких кодов в XLSX (для ввода в оборот)
+    for pdf_name, codes in codes_dict.items():  # Перебор PDF и их списков кодов
+        for part_num, chunk in enumerate(_chunk_list(codes, MAX_CODES_PER_TEMPLATE), start=1):
+            df = pd.DataFrame(chunk)
+            base_name = pdf_name if part_num == 1 else f"{pdf_name}_part{part_num}"
+            xlsx_path = input_dir / f"{base_name}.xlsx"
+            df.to_excel(xlsx_path, index=False, header=False)
+
+def merge_input_xlsx_files(input_dir: Path) -> None:  # Объединение XLSX из папки «Ввод в оборот» в файлы по 30k кодов
+    xlsx_files = sorted(input_dir.glob("*.xlsx"))
+    if not xlsx_files:
+        return
+    dfs = []
+    for f in xlsx_files:
+        try:
+            df = pd.read_excel(f, header=None)
+            if not df.empty:
+                dfs.append(df)
+        except Exception as e:
+            logging.warning(f"Не удалось прочитать {f.name}: {e}")
+    if not dfs:
+        return
+    combined = pd.concat(dfs, ignore_index=True)
+    for part_num, start in enumerate(range(0, len(combined), MAX_CODES_PER_TEMPLATE), start=1):
+        chunk = combined.iloc[start : start + MAX_CODES_PER_TEMPLATE]
+        out_path = input_dir / f"Ввод_в_оборот_все_part{part_num}.xlsx"
+        chunk.to_excel(out_path, index=False, header=False)
+        logging.info(f"Файл: {out_path} (строк: {len(chunk)})")
+
+
+def save_full_codes(extracted_codes_by_pdf: dict, full_codes_dir: Path) -> None:
+    """Сохраняет полные (сырые) коды сразу после сканирования в папку «Полные коды» — по одному файлу на PDF."""
+    full_codes_dir.mkdir(parents=True, exist_ok=True)
+    for pdf_name, codes in extracted_codes_by_pdf.items():
+        path = full_codes_dir / f"{pdf_name}.txt"
+        with open(path, "w", encoding="utf-8") as f:
+            for code in codes:
+                line = (code.strip() if code else "") + "\n"
+                f.write(line)
+    logging.info(f"Полные коды сохранены в {full_codes_dir}")
+
+
+def save_to_csv(extracted_codes: dict, reports_dir: Path):  # Сохранение распознанных кодов в CSV (отчёт о нанесении)
+    for pdf_name, codes in extracted_codes.items():
+        codes = [c for c in codes if (c or "").strip()]  # только распознанные, без пустых
+        for part_num, chunk in enumerate(_chunk_list(codes, MAX_CODES_PER_TEMPLATE), start=1):
+            df = pd.DataFrame(chunk)
+            base_name = pdf_name if part_num == 1 else f"{pdf_name}_part{part_num}"
+            csv_path = reports_dir / f"{base_name}.csv"
+            df.to_csv(csv_path, index=False, header=False, encoding="utf-8")
+
+def merge_reports_csv_files(reports_dir: Path) -> None:  # Объединение CSV из папки «Отчеты о нанесении» в файлы по 30k кодов
+    csv_files = sorted(reports_dir.glob("*.csv"))
+    if not csv_files:
+        return
+    dfs = []
+    for f in csv_files:
+        try:
+            df = pd.read_csv(f, header=None, encoding="utf-8")
+            if not df.empty:
+                dfs.append(df)
+        except Exception as e:
+            logging.warning(f"Не удалось прочитать {f.name}: {e}")
+    if not dfs:
+        return
+    combined = pd.concat(dfs, ignore_index=True)
+    for part_num, start in enumerate(range(0, len(combined), MAX_CODES_PER_TEMPLATE), start=1):
+        chunk = combined.iloc[start : start + MAX_CODES_PER_TEMPLATE]
+        out_path = reports_dir / f"Отчеты_о_нанесении_все_part{part_num}.csv"
+        chunk.to_csv(out_path, index=False, header=False, encoding="utf-8")
+        logging.info(f"Файл: {out_path} (строк: {len(chunk)})")
 
 def main():
     try:
         paths = create_output_structure()
         uploaded_pdf_dir = paths["uploaded_pdf"]
         data_matrix_dir = paths["data_matrix"]
+        full_codes_dir = paths["full_codes"]
         reports_dir = paths["reports"]
         input_dir = paths["input_folder"]
         upd_dir = paths["upd_folder"]
-        source_dir = uploaded_pdf_dir.parent  # source
-        setup_logging(reports_dir)
-        
-        # Очищаем подпапки ИТОГ
-        clear_itog_subdirs(input_dir, reports_dir, upd_dir)
+        source_dir = uploaded_pdf_dir.parent
+        setup_logging(source_dir)
+        clear_itog_subdirs(full_codes_dir, input_dir, reports_dir, upd_dir)
     except Exception as e:
         logging.error(f"Не удалось создать структуру папок: {e}. Выход из программы")
         return
-    
-    # Выбор PDF-файлов пользователем
-    pdf_files = select_pdf_files()
-    if not pdf_files:
-        logging.error("Не выбрано ни одного PDF-файла. Завершение работы")
-        return
 
-    # Копирование файлов в ЗагруженныеPDF
+    source_choice = input("Как загрузить исходные файлы? 1 — Выбрать PDF файлы, 2 — Выбрать папки (все PDF из папок): ").strip()
+    if source_choice == "2":
+        logging.info("Откроется окно выбора папки (если не видно — проверьте панель задач).")
+        pdf_files = select_pdf_folders()
+        if not pdf_files:
+            logging.error("Не выбрано ни одной папки с PDF или в папках нет PDF. Завершение работы")
+            return
+        logging.info(f"Найдено PDF в выбранных папках: {len(pdf_files)} файлов")
+    else:
+        logging.info("Откроется окно выбора файлов (если не видно — проверьте панель задач).")
+        pdf_files = select_pdf_files()
+        if not pdf_files:
+            logging.error("Не выбрано ни одного PDF-файла. Завершение работы")
+            return
+
+    logging.info("Копирование и переименование PDF по порядковому номеру (1.pdf, 2.pdf, ...)...")
     copy_pdf_to_uploaded_dir(pdf_files, uploaded_pdf_dir)
 
     POPPLER_BIN_PATH = r"C:\Tools\poppler\Library\bin"
 
     logging.info("Конвертация PDF в PNG...")
     try:
-        processed_pdfs_info = convert_pdf_to_images(
-            uploaded_pdf_dir=uploaded_pdf_dir,
-            data_matrix_dir=data_matrix_dir,
-            poppler_path=POPPLER_BIN_PATH
-        )
+        processed_pdfs_info = convert_pdf_to_images(uploaded_pdf_dir=uploaded_pdf_dir, data_matrix_dir=data_matrix_dir, poppler_path=POPPLER_BIN_PATH)
         if not processed_pdfs_info:
             logging.error("Не удалось конвертировать PDF-файлы. Завершение работы")
             return
@@ -123,64 +329,108 @@ def main():
         logging.error(f"Ошибка при конвертации PDF: {e}. Завершение работы")
         return
 
+    choice = input("Что хотите получить на выходе? (1) Файлы для Ввода в оборот, (2) Файлы для отчета о нанесении, (3) Шаблон для загрузки УПД, (4) Все сразу (через пробел, например: 1 3): ")
+    choices = [int(x) for x in choice.split() if x.isdigit()]
+    if not choices:
+        logging.error("Неверный ввод. Завершение работы")
+        return
+
+    if 4 in choices:
+        choices = [1, 2, 3]
+        logging.info("Выбран вариант 4: выполнение всех действий")
+
     logging.info("Распознавание DataMatrix-кодов...")
     try:
-        extracted_codes_by_pdf = extract_datamatrix_from_image(
-            data_matrix_dir=data_matrix_dir,
-            reports_dir=reports_dir
+        extracted_codes_by_pdf, decode_stats = extract_datamatrix_from_image(
+            data_matrix_dir=data_matrix_dir, reports_dir=reports_dir
         )
         if not extracted_codes_by_pdf:
             logging.error("Не удалось извлечь DataMatrix-коды. Завершение работы")
             return
-        logging.info(f"Извлечено кодов: {sum(len(codes) for codes in extracted_codes_by_pdf.values())}")
     except Exception as e:
         logging.error(f"Ошибка при извлечении кодов: {e}. Завершение работы")
         return
 
-    logging.info("Форматирование КИЗ-кодов...")
-    try:
-        formatted_codes = format_kiz_code(
-            reports_dir=reports_dir,
-            input_dir=input_dir,
-            upd_dir=upd_dir,
-            include_short_codes=True
-        )
-        if not formatted_codes:
-            logging.error("Не удалось отформатировать КИЗ-коды. Завершение работы")
+    # Диагностика: где теряются коды (страницы vs распознавание)
+    total_img = decode_stats.get("total_images", 0)
+    total_dec = decode_stats.get("total_decoded", 0)
+    total_fail = decode_stats.get("total_failed", 0)
+    logging.info(f"Страниц (изображений): {total_img}, распознано кодов: {total_dec}, не распознано: {total_fail}")
+    if total_fail and decode_stats.get("failed_by_pdf"):
+        by_pdf = decode_stats["failed_by_pdf"]
+        top_failed = sorted(by_pdf.items(), key=lambda x: -x[1])[:10]
+        logging.info(f"Больше всего неудач по файлам: {', '.join(f'{k}({v})' for k, v in top_failed)}")
+
+    save_full_codes(extracted_codes_by_pdf, full_codes_dir)
+
+    logging.info("Обработка кодов для шаблонов...")
+    duplicate_report = collect_duplicate_report(extracted_codes_by_pdf)
+
+    short_codes_dict = {}
+    formatted_codes_dict = {}
+    code_types = {}
+    format_stats = {}
+    if 1 in choices or 3 in choices:
+        logging.info("Форматирование КИЗ-кодов...")
+        try:
+            short_codes_dict, formatted_codes_dict, code_types, format_stats = format_kiz_code(
+                extracted_codes_by_pdf=extracted_codes_by_pdf, include_short_codes=True, verbose=False
+            )
+            if not short_codes_dict:
+                logging.error("Форматирование не вернуло данных. Завершение работы")
+                return
+            acc = format_stats.get("accepted", 0)
+            se = format_stats.get("skipped_empty", 0)
+            sf = format_stats.get("skipped_format", 0)
+            st = format_stats.get("skipped_type_mismatch", 0)
+            logging.info(
+                f"После форматирования: принято {acc}, отброшено: пустые {se}, формат {sf}, другой тип в файле {st}"
+            )
+        except Exception as e:
+            logging.error(f"Ошибка при форматировании кодов: {e}. Завершение работы")
             return
-    except Exception as e:
-        logging.error(f"Ошибка при форматировании кодов: {e}. Завершение работы")
-        return
 
-    logging.info("Запрос данных о товарах...")
-    try:
-        product_data = get_product_data(
-            uploaded_pdf_dir=uploaded_pdf_dir,
-            reports_dir=reports_dir
-        )
-        if not product_data:
-            logging.error("Не получены данные о товарах. Завершение работы")
+    if 1 in choices:
+        save_to_xlsx(short_codes_dict, input_dir)
+        merge_input_xlsx_files(input_dir)
+        logging.info(f"Сохранено в XLSX в {input_dir}")
+
+    if 2 in choices:
+        save_to_csv(extracted_codes_by_pdf, reports_dir)
+        merge_reports_csv_files(reports_dir)
+        logging.info(f"Сохранено в CSV в {reports_dir}")
+
+    if 3 in choices:
+        logging.info("Запрос данных о товарах...")
+        try:
+            product_data = get_product_data(uploaded_pdf_dir=uploaded_pdf_dir, reports_dir=reports_dir, extracted_codes_by_pdf=extracted_codes_by_pdf, code_types=code_types)
+            if not product_data:
+                logging.error("Не получены данные о товарах. Завершение работы")
+                return
+        except Exception as e:
+            logging.error(f"Ошибка при запросе данных о товарах: {e}. Завершение работы")
             return
-    except Exception as e:
-        logging.error(f"Ошибка при запросе данных о товарах: {e}. Завершение работы")
-        return
 
-    logging.info("Генерация итогового CSV...")
-    try:
-        output_csv_path = upd_dir / "final_upd.csv"
-        generate_final_csv(
-            reports_dir=reports_dir,
-            upd_dir=upd_dir,
-            output_path=output_csv_path
-        )
-    except Exception as e:
-        logging.error(f"Ошибка при создании CSV: {e}. Завершение работы")
-        return
+        logging.info("Генерация итогового CSV...")
+        try:
+            output_csv_path = upd_dir / "final_upd.csv"
+            written_csv_paths = generate_final_csv(
+                formatted_codes=formatted_codes_dict,
+                product_data=product_data,
+                upd_dir=upd_dir,
+                output_path=output_csv_path,
+                max_codes_per_file=MAX_CODES_PER_TEMPLATE,
+            )
+            if written_csv_paths:
+                for p in written_csv_paths:
+                    logging.info(f"УПД: {p}")
+        except Exception as e:
+            logging.error(f"Ошибка при создании CSV: {e}. Завершение работы")
+            return
 
+    log_duplicate_report(duplicate_report)
     logging.info("Программа успешно завершена")
-    logging.info(f"Итоговый CSV: {output_csv_path}")
 
-    # Очистка папки source
     clear_source_dir(source_dir)
 
 if __name__ == "__main__":
@@ -191,7 +441,10 @@ if __name__ == "__main__":
     except Exception as e:
         logging.error(f"Критическая ошибка: {e}")
     finally:
-        # Очистка source в случае любой ошибки или прерывания
+        logger = logging.getLogger()
+        for handler in logger.handlers[:]:
+            handler.close()
+            logger.removeHandler(handler)
         paths = create_output_structure()
         source_dir = paths["uploaded_pdf"].parent
         clear_source_dir(source_dir)

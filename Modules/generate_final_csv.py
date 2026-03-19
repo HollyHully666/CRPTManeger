@@ -1,107 +1,84 @@
 from pathlib import Path
-import logging
-import json
-from typing import Dict, List
 
-if not logging.getLogger().hasHandlers():
-    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+# Максимум кодов в одном файле шаблона УПД (ограничение Честного знака)
+MAX_CODES_PER_FILE = 30000
 
-def generate_final_csv(reports_dir: Path, upd_dir: Path, output_path: Path | None = None) -> None:
-    """
-    Генерирует итоговый CSV-файл на основе отформатированных кодов и данных о товарах.
-    Args:
-        reports_dir (Path): Путь к папке с отчётами (ИТОГ/Отчеты о нанесении, содержит product_data.json).
-        upd_dir (Path): Путь к папке с отформатированными кодами (ИТОГ/Для УПД, содержит <pdf_name>.txt).
-        output_path (Path, optional): Путь для сохранения CSV. Если None, используется upd_dir/final_upd.csv.
-    """
-    #logging.info(f"Начинаю генерацию CSV-файла: {output_path or (upd_dir / 'final_upd.csv')}")
+
+def _chunk_list(lst: list, chunk_size: int):
+    """Разбивает список на части не больше chunk_size элементов."""
+    for i in range(0, len(lst), chunk_size):
+        yield lst[i : i + chunk_size]
+
+
+def generate_final_csv(
+    formatted_codes: dict[str, list[str]],
+    product_data: dict,
+    upd_dir: Path,
+    output_path: Path | None = None,
+    max_codes_per_file: int = MAX_CODES_PER_FILE,
+) -> list[Path]:
     output_path = output_path or (upd_dir / "final_upd.csv")
     output_path.parent.mkdir(parents=True, exist_ok=True)
+    stem = output_path.stem
+    suffix = output_path.suffix
+    parent = output_path.parent
 
-    # Загружаем данные о товарах
-    product_data_file = reports_dir / "product_data.json"
-    product_data = {}
-    try:
-        with open(product_data_file, "r", encoding="utf-8") as f:
-            product_data = json.load(f)
-        #logging.info(f"Загружены данные о товарах из: {product_data_file}")
-    except Exception as e:
-        logging.error(f"Ошибка при загрузке {product_data_file}: {e}. Завершение.")
-        return
+    written_paths: list[Path] = []
+    current_file_rows: list[str] = []
+    current_code_count = 0
+    file_index = 1
+    row_index_in_file = 1
 
-    # Проверяем режим (один товар или разные)
-    is_single_product = product_data.get("is_single_product", False)
-    #logging.info(f"Режим: {'Один товар' if is_single_product else 'Разные товары'}")
+    for pdf_name, codes in formatted_codes.items():
+        if not codes or pdf_name not in product_data:
+            continue
 
-    csv_rows = []
-    if is_single_product:
-        # Для одного товара: первая строка полная, остальные только с кодами
-        single_data = product_data.get("all", {})
-        if not single_data:
-            #logging.error("Данные для одного товара не найдены. Завершение.")
-            return
-        name, price, quantity, okei, vat, code_type = single_data
+        data_list = product_data.get(pdf_name, [])
+        if not data_list:
+            continue
+
+        data = data_list[0] if isinstance(data_list, list) else data_list
+        name, price, quantity, okei, vat, code_type = data
         vat = "без НДС" if vat == "none" else vat
 
-        # Собираем все коды из всех файлов
-        all_codes = []
-        for txt_file in upd_dir.glob("*.txt"):
-            if txt_file.name == "final_upd.csv":
-                continue
-            pdf_name = txt_file.stem
-            try:
-                #logging.info(f"Обрабатываю файл: {txt_file.name} (PDF: {pdf_name})")
-                with open(txt_file, "r", encoding="utf-8") as f:
-                    codes = [line.strip() for line in f if line.strip()]
-                all_codes.extend(codes)
-            except Exception as e:
-                #logging.error(f"Ошибка при чтении {txt_file}: {e}. Пропускаю.")
-                continue
+        for code_chunk in _chunk_list(codes, max_codes_per_file):
+            chunk_size = len(code_chunk)
+            # Если добавление этого блока превысит лимит и в текущем файле уже есть строки — пишем файл и начинаем новый
+            if current_code_count + chunk_size > max_codes_per_file and current_file_rows:
+                part_path = parent / f"{stem}_part{file_index}{suffix}"
+                _write_csv_rows(part_path, current_file_rows)
+                written_paths.append(part_path)
+                current_file_rows = []
+                current_code_count = 0
+                file_index += 1
+                row_index_in_file = 1
 
-        if not all_codes:
-            #logging.error("Коды не найдены. CSV не создан.")
-            return
+            # Одна строка с данными товара и первым кодом, остальные — только коды
+            current_file_rows.append(
+                f"{row_index_in_file},{name},{price},{chunk_size},{okei},{vat},{code_type},{code_chunk[0]}"
+            )
+            for code in code_chunk[1:]:
+                current_file_rows.append(f"{row_index_in_file},,,,,,{code_type},{code}")
+            row_index_in_file += 1
+            current_code_count += chunk_size
 
-        csv_rows.append(f"1,{name},{price},{quantity},{okei},{vat},{code_type},{all_codes[0]}")
-        for code in all_codes[1:]:
-            csv_rows.append(f"1,,,,,,{code_type},{code}")
+    if not current_file_rows:
+        print("Нет данных для создания CSV")
+        return written_paths
 
+    # Один файл — сохраняем по переданному пути (final_upd.csv), иначе — final_upd_part1.csv, part2, ...
+    if file_index == 1:
+        part_path = output_path
     else:
-        # Для разных товаров: индекс зависит от файла
-        row_index = 1
-        for txt_file in sorted(upd_dir.glob("*.txt")):
-            if txt_file.name == "final_upd.csv":
-                continue
-            pdf_name = txt_file.stem
-            data = product_data.get(pdf_name, {})
-            if not data:
-                #logging.warning(f"Данные о товаре для {pdf_name} не найдены. Пропускаю.")
-                continue
+        part_path = parent / f"{stem}_part{file_index}{suffix}"
+    _write_csv_rows(part_path, current_file_rows)
+    written_paths.append(part_path)
+    return written_paths
 
-            name, price, quantity, okei, vat, code_type = data
-            vat = "без НДС" if vat == "none" else vat
 
-            try:
-                #logging.info(f"Обрабатываю файл: {txt_file.name} (PDF: {pdf_name}, индекс: {row_index})")
-                with open(txt_file, "r", encoding="utf-8") as f:
-                    codes = [line.strip() for line in f if line.strip()]
-                if codes:
-                    csv_rows.append(f"{row_index},{name},{price},{quantity},{okei},{vat},{code_type},{codes[0]}")
-                    for code in codes[1:]:
-                        csv_rows.append(f"{row_index},,,,,,{code_type},{code}")
-                row_index += 1
-            except Exception as e:
-                #logging.error(f"Ошибка при чтении {txt_file}: {e}. Пропускаю.")
-                continue
-
-    if not csv_rows:
-        #logging.error("Нет данных для записи в CSV. Завершение.")
-        return
-
+def _write_csv_rows(path: Path, rows: list[str]) -> None:
     try:
-        with open(output_path, "w", encoding="utf-8") as f:
-            f.write("\n".join(csv_rows) + "\n")
-        #logging.info(f"CSV-файл успешно создан: {output_path}")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write("\n".join(rows) + "\n")
     except Exception as e:
-        #logging.error(f"Ошибка при создании {output_path}: {e}")
-        return
+        print(f"Ошибка при записи CSV {path}: {e}")
