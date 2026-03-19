@@ -3,9 +3,15 @@ import logging  # Модуль для логирования
 import logging.handlers  # Дополнительные обработчики логов (например, ротация файлов)
 from datetime import datetime  # Дата и время для меток и имён файлов
 import shutil  # Операции с файлами и папками (копирование, удаление)
+import zipfile  # Работа с ZIP-архивами
 import tkinter as tk  # Библиотека Tkinter для GUI
 from tkinter import filedialog  # Диалог выбора файлов
 from typing import List  # Аннотация типа: список
+
+try:
+    import rarfile  # type: ignore[import]  # Работа с RAR-архивами (необязательный модуль)
+except ImportError:  # Если модуль не установлен, просто отключаем поддержку RAR с сообщением в логах
+    rarfile = None  # type: ignore[assignment]
 
 from Modules.createOutputStructure import create_output_structure  # Создание структуры выходных папок
 from Modules.pdf_to_png import convert_pdf_to_images  # Конвертация PDF в изображения PNG
@@ -48,8 +54,14 @@ def select_pdf_files() -> List[Path]:
     root = _prepare_file_dialog_root()
     try:
         file_paths = filedialog.askopenfilenames(
-            title="Выберите PDF-файлы",
-            filetypes=[("PDF files", "*.pdf")],
+            title="Выберите PDF или архивы (PDF, ZIP, RAR)",
+            filetypes=[
+                ("Все файлы", "*.*"),
+                ("PDF файлы", "*.pdf"),
+                ("Архивы ZIP", "*.zip"),
+                ("Архивы RAR", "*.rar"),
+                ("Все поддерживаемые", "*.pdf *.zip *.rar"),
+            ],
             parent=root,
         )
         return [Path(p) for p in file_paths] if file_paths else []
@@ -78,10 +90,14 @@ def select_pdf_folders() -> List[Path]:
     seen: set[Path] = set()
     result: List[Path] = []
     for folder in folders:
-        for pdf_path in sorted(folder.glob("*.pdf")):
-            if pdf_path not in seen:
-                seen.add(pdf_path)
-                result.append(pdf_path)
+        for p in sorted(folder.rglob("*")):
+            if not p.is_file():
+                continue
+            if p.suffix.lower() not in {".pdf", ".zip", ".rar"}:
+                continue
+            if p not in seen:
+                seen.add(p)
+                result.append(p)
     return result
 
 
@@ -103,6 +119,81 @@ def copy_pdf_to_uploaded_dir(pdf_files: List[Path], uploaded_pdf_dir: Path) -> N
             logging.info(f"  [{i}] {pdf_file.name} -> {dest_path.name}")
         except Exception as e:
             logging.error(f"Ошибка при копировании {pdf_file}: {e}")
+
+
+def _collect_pdfs_under(root: Path) -> list[Path]:
+    """Рекурсивно находит все PDF под указанной директорией."""
+    return sorted(p for p in root.rglob("*.pdf") if p.is_file())
+
+
+def _expand_archives(paths: List[Path], source_dir: Path) -> List[Path]:
+    """Обрабатывает ZIP/RAR среди выбранных путей: распаковывает и возвращает список всех PDF.
+
+    - Обычные PDF возвращаются как есть.
+    - ZIP/RAR распаковываются во временную папку внутри source_dir.
+    - Если внутри архива есть одна папка с именем, совпадающим с именем архива — проваливаемся в неё.
+    - Далее рекурсивно собираем все PDF.
+    """
+    pdf_files: list[Path] = []
+    archives: list[Path] = []
+
+    for p in paths:
+        suffix = p.suffix.lower()
+        if suffix == ".pdf":
+            pdf_files.append(p)
+        elif suffix in {".zip", ".rar"}:
+            archives.append(p)
+        else:
+            logging.warning(f"Игнорирую неподдерживаемый файл: {p}")
+
+    if not archives:
+        return pdf_files
+
+    archives_root = source_dir / "_РАСПАКОВАННЫЕ_АРХИВЫ"
+    if archives_root.exists():
+        try:
+            shutil.rmtree(archives_root)
+        except Exception as e:
+            logging.warning(f"Не удалось очистить временную папку архивов {archives_root}: {e}")
+    archives_root.mkdir(parents=True, exist_ok=True)
+
+    for arch in archives:
+        arch_dir = archives_root / arch.stem
+        arch_dir.mkdir(parents=True, exist_ok=True)
+        suffix = arch.suffix.lower()
+        try:
+            if suffix == ".zip":
+                with zipfile.ZipFile(arch, "r") as zf:
+                    zf.extractall(arch_dir)
+            elif suffix == ".rar":
+                if rarfile is None:
+                    logging.error(
+                        f"RAR-архив {arch} пропущен: модуль 'rarfile' не установлен. "
+                        f"Установите его командой 'pip install rarfile' и убедитесь, что в системе есть unrar."
+                    )
+                    continue
+                with rarfile.RarFile(arch) as rf:  # type: ignore[operator]
+                    rf.extractall(arch_dir)
+            else:
+                logging.warning(f"Архив с неподдерживаемым расширением пропущен: {arch}")
+                continue
+        except Exception as e:
+            logging.error(f"Ошибка при распаковке архива {arch}: {e}")
+            continue
+
+        root = arch_dir
+        subdirs = [d for d in root.iterdir() if d.is_dir()]
+        if len(subdirs) == 1 and subdirs[0].name == arch.stem:
+            root = subdirs[0]
+
+        archive_pdfs = _collect_pdfs_under(root)
+        if not archive_pdfs:
+            logging.warning(f"В архиве {arch} не найдено ни одного PDF-файла.")
+        else:
+            logging.info(f"Из архива {arch} найдено PDF: {len(archive_pdfs)}")
+            pdf_files.extend(archive_pdfs)
+
+    return pdf_files
 
 def clear_source_dir(source_dir: Path) -> None:  # Полная очистка и пересоздание служебной директории
     try:
@@ -262,6 +353,34 @@ def save_full_codes(extracted_codes_by_pdf: dict, full_codes_dir: Path) -> None:
     logging.info(f"Полные коды сохранены в {full_codes_dir}")
 
 
+def archive_itog_folder(itog_dir: Path) -> None:
+    """Упаковывает содержимое папки «ИТОГ» в ZIP-архив внутри этой же папки."""
+    if not itog_dir.exists():
+        logging.warning(f"Папка ИТОГ не найдена: {itog_dir}")
+        return
+
+    archive_path = itog_dir / "ИТОГ_результаты.zip"
+    try:
+        if archive_path.exists():
+            archive_path.unlink()
+    except Exception as e:
+        logging.warning(f"Не удалось удалить старый архив {archive_path}: {e}")
+
+    try:
+        with zipfile.ZipFile(archive_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+            for path in itog_dir.rglob("*"):
+                if not path.is_file():
+                    continue
+                rel_path = path.relative_to(itog_dir)
+                # Не добавляем сам архив внутрь него же
+                if path.resolve() == archive_path.resolve() or rel_path == Path(archive_path.name):
+                    continue
+                zf.write(path, rel_path)
+        logging.info(f"Итоговые файлы упакованы в архив: {archive_path}")
+    except Exception as e:
+        logging.error(f"Ошибка при упаковке папки ИТОГ в архив: {e}")
+
+
 def save_to_csv(extracted_codes: dict, reports_dir: Path):  # Сохранение распознанных кодов в CSV (отчёт о нанесении)
     for pdf_name, codes in extracted_codes.items():
         codes = [c for c in codes if (c or "").strip()]  # только распознанные, без пустых
@@ -308,20 +427,25 @@ def main():
         logging.error(f"Не удалось создать структуру папок: {e}. Выход из программы")
         return
 
-    source_choice = input("Как загрузить исходные файлы? 1 — Выбрать PDF файлы, 2 — Выбрать папки (все PDF из папок): ").strip()
-    if source_choice == "2":
-        logging.info("Откроется окно выбора папки (если не видно — проверьте панель задач).")
-        pdf_files = select_pdf_folders()
+    logging.info("Откроется окно выбора файлов (если не видно — проверьте панель задач).")
+    selected_paths = select_pdf_files()
+    if selected_paths:
+        pdf_files = _expand_archives(selected_paths, source_dir)
         if not pdf_files:
-            logging.error("Не выбрано ни одной папки с PDF или в папках нет PDF. Завершение работы")
+            logging.error("Не найдено ни одного PDF-файла среди выбранных файлов/архивов. Завершение работы")
             return
-        logging.info(f"Найдено PDF в выбранных папках: {len(pdf_files)} файлов")
     else:
-        logging.info("Откроется окно выбора файлов (если не видно — проверьте панель задач).")
-        pdf_files = select_pdf_files()
-        if not pdf_files:
-            logging.error("Не выбрано ни одного PDF-файла. Завершение работы")
+        logging.info("Файлы не выбраны. Откроется окно выбора папки (если не видно — проверьте панель задач).")
+        folder_items = select_pdf_folders()
+        if not folder_items:
+            logging.error("Не выбрано ни одного файла или папки. Завершение работы")
             return
+        pdf_files = _expand_archives(folder_items, source_dir)
+        if not pdf_files:
+            logging.error("В выбранных папках/архивах не найдено ни одного PDF-файла. Завершение работы")
+            return
+
+    logging.info(f"Найдено PDF к обработке: {len(pdf_files)} файлов")
 
     logging.info("Копирование и переименование PDF по порядковому номеру (1.pdf, 2.pdf, ...)...")
     copy_pdf_to_uploaded_dir(pdf_files, uploaded_pdf_dir)
@@ -439,6 +563,11 @@ def main():
             return
 
     log_duplicate_report(duplicate_report)
+
+    # Архивируем все результаты в папке «ИТОГ»
+    itog_dir = full_codes_dir.parent
+    archive_itog_folder(itog_dir)
+
     logging.info("Программа успешно завершена")
 
     clear_source_dir(source_dir)
